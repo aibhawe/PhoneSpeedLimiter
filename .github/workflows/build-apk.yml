@@ -29,15 +29,23 @@ jobs:
           gradle-version: "8.8"
           cache-provider: basic
 
-      - name: Install Android SDK 34 and NDK r29
-        shell: bash
+      - name: Configure Android SDK
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "ndk;29.0.14206865"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          echo "Checking Android SDK 34..."
+          test -d "$ANDROID_HOME/platforms/android-34"
+
+          echo "Checking Build Tools 34.0.0..."
+          test -d "$ANDROID_HOME/build-tools/34.0.0"
+
+          echo "Checking NDK 29..."
+          test -d "$ANDROID_HOME/ndk/29.0.14206865"
+
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+          echo "Android environment OK"
 
       - name: Fetch native tunnel dependency
         shell: bash
