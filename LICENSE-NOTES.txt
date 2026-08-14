@@ -1,0 +1,9 @@
+PhoneSpeedLimiter application code in this archive is provided for the user's project.
+
+Build-time third-party dependency:
+  hev-socks5-tunnel by heiher
+  https://github.com/heiher/hev-socks5-tunnel
+  License: MIT
+  Pinned commit: 64cc609f945253b0e9ebc56317d544268f3c68c1
+
+The third-party source is intentionally not bundled in this archive; setup_dependency.sh retrieves it directly from its upstream repository.
