@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -30,21 +30,13 @@ jobs:
           cache-provider: basic
 
       - name: Configure Android SDK
+        shell: bash
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-
-          echo "Checking Android SDK 34..."
           test -d "$ANDROID_HOME/platforms/android-34"
-
-          echo "Checking Build Tools 34.0.0..."
           test -d "$ANDROID_HOME/build-tools/34.0.0"
-
-          echo "Checking NDK 29..."
           test -d "$ANDROID_HOME/ndk/29.0.14206865"
-
           echo "sdk.dir=$ANDROID_HOME" > local.properties
-
           echo "Android environment OK"
 
       - name: Fetch native tunnel dependency
@@ -64,7 +56,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: PhoneSpeedLimiter-v1.1-debug-apk
+          name: PhoneSpeedLimiter-v1.3-hyperos-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
