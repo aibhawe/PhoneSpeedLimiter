@@ -54,7 +54,7 @@ jobs:
           ./setup_dependency.sh
 
       - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+        run: gradle --no-daemon clean :app:assembleDebug
 
       - name: Verify APK
         run: |
