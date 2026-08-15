@@ -9,7 +9,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
-import android.net.LinkProperties;
+import android.net.IpPrefix;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.VpnService;
@@ -19,10 +19,8 @@ import android.os.ParcelFileDescriptor;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 
 public class SpeedVpnService extends VpnService {
     public static final String ACTION_START = "com.antenna.speedlimiter.START";
@@ -34,11 +32,18 @@ public class SpeedVpnService extends VpnService {
     static final String KEY_RUNNING = "running";
     static final String KEY_DOWNLOAD_KBPS = "download_kbps";
     static final String KEY_UPLOAD_KBPS = "upload_kbps";
+    static final String KEY_LAST_ERROR = "last_error";
 
     private static final int SOCKS_PORT = 10808;
     private static final int NOTIFICATION_ID = 10;
     private static final String CHANNEL_ID = "speed_limit";
     private static final String PREFS = "speed_limiter";
+
+    // Match the stable defaults used by heiher/sockstun.
+    private static final int TUN_MTU = 8500;
+    private static final String TUN_IPV4 = "198.18.0.1";
+    private static final String TUN_IPV6 = "fc00::1";
+    private static final String MAPPED_DNS = "198.18.0.2";
 
     private static native boolean TProxyStartService(String configPath, int fd);
     private static native boolean TProxyStopService();
@@ -94,6 +99,7 @@ public class SpeedVpnService extends VpnService {
 
         saveLimits(downloadKbps, uploadKbps);
         if (desiredEnabled) setDesiredEnabled(true);
+        prefs(this).edit().remove(KEY_LAST_ERROR).apply();
 
         startAsForeground(downloadKbps, uploadKbps);
 
@@ -106,7 +112,9 @@ public class SpeedVpnService extends VpnService {
         try {
             startEverything(downloadKbps, uploadKbps);
             setRunning(true);
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            String msg = e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage());
+            prefs(this).edit().putString(KEY_LAST_ERROR, msg).apply();
             e.printStackTrace();
             setRunning(false);
             cleanupResources();
@@ -114,14 +122,6 @@ public class SpeedVpnService extends VpnService {
         return START_STICKY;
     }
 
-    /**
-     * Build a compatibility-focused VPN transport.
-     *
-     * The key difference from v1.2 is that the proxy's upstream sockets are
-     * explicitly bound to a non-VPN Android Network. We no longer depend on
-     * addDisallowedApplication(self), which can behave differently with OEM
-     * routing/Always-on implementations.
-     */
     private void startEverything(long downloadKbps, long uploadKbps) throws Exception {
         ConnectivityManager cm =
                 (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -136,36 +136,52 @@ public class SpeedVpnService extends VpnService {
                 this, underlying, SOCKS_PORT, uploadKbps, downloadKbps);
         socksServer.start();
 
-        // IPv4-only VPN interface for maximum OEM compatibility. The selected
-        // underlying network can still itself be IPv4/IPv6; outbound proxy
-        // sockets are bound directly to that network.
         Builder builder = new Builder()
                 .setSession("Phone Speed Limiter")
-                .setMtu(1500)
+                .setMtu(TUN_MTU)
                 .setBlocking(false)
                 .setUnderlyingNetworks(new Network[]{underlying})
-                .addAddress("10.111.222.1", 24)
-                .addRoute("0.0.0.0", 0);
+                .addAddress(TUN_IPV4, 32)
+                .addRoute("0.0.0.0", 0)
+                .addAddress(TUN_IPV6, 128)
+                .addRoute("::", 0)
+                // Mapped DNS avoids depending on a normal UDP DNS exchange
+                // through the VPN. hev-socks5-tunnel maps domains to fake IPv4
+                // addresses and later reconstructs the domain for SOCKS CONNECT.
+                .addDnsServer(MAPPED_DNS);
 
-        addUnderlyingDnsServers(builder, cm, underlying);
+        // Explicitly keep the local SOCKS control path out of the TUN on API 33+.
+        // This is useful on OEM routing stacks where a 0/0 VPN route can otherwise
+        // interact badly with localhost traffic.
+        if (Build.VERSION.SDK_INT >= 33) {
+            builder.excludeRoute(new IpPrefix(InetAddress.getByName("127.0.0.0"), 8));
+        }
 
         tunFd = builder.establish();
         if (tunFd == null) throw new IOException("Could not establish VPN");
 
-        // Keep Android informed about the real carrier network used by the
-        // VPN's protected/bound upstream sockets.
-        setUnderlyingNetworks(new Network[]{underlying});
+        if (!setUnderlyingNetworks(new Network[]{underlying})) {
+            // Not fatal: Builder already received the same underlying network.
+            prefs(this).edit().putString(KEY_LAST_ERROR,
+                    "Warning: setUnderlyingNetworks() returned false").apply();
+        }
 
         File configFile = new File(getCacheDir(), "tproxy.conf");
         String config = "misc:\n" +
-                "  task-stack-size: 20480\n" +
+                "  task-stack-size: 81920\n" +
                 "tunnel:\n" +
-                "  mtu: 1500\n" +
+                "  mtu: " + TUN_MTU + "\n" +
                 "  icmp: 'reply'\n" +
                 "socks5:\n" +
                 "  port: " + SOCKS_PORT + "\n" +
                 "  address: '127.0.0.1'\n" +
-                "  udp: 'udp'\n";
+                "  udp: 'udp'\n" +
+                "mapdns:\n" +
+                "  address: " + MAPPED_DNS + "\n" +
+                "  port: 53\n" +
+                "  network: 240.0.0.0\n" +
+                "  netmask: 240.0.0.0\n" +
+                "  cache-size: 10000\n";
 
         try (FileOutputStream out = new FileOutputStream(configFile, false)) {
             out.write(config.getBytes(StandardCharsets.UTF_8));
@@ -200,28 +216,6 @@ public class SpeedVpnService extends VpnService {
         return caps != null
                 && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
-    }
-
-    private void addUnderlyingDnsServers(Builder builder,
-                                         ConnectivityManager cm,
-                                         Network underlying) {
-        boolean added = false;
-        LinkProperties lp = cm.getLinkProperties(underlying);
-        if (lp != null) {
-            List<InetAddress> dnsServers = lp.getDnsServers();
-            for (InetAddress dns : dnsServers) {
-                // The v1.3 tunnel itself is IPv4-only, so only advertise IPv4
-                // DNS servers inside the VPN.
-                if (dns instanceof Inet4Address) {
-                    builder.addDnsServer(dns);
-                    added = true;
-                }
-            }
-        }
-
-        if (!added) {
-            builder.addDnsServer("1.1.1.1");
-        }
     }
 
     private void startAsForeground(long downloadKbps, long uploadKbps) {
